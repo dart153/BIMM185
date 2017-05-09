@@ -1,0 +1,358 @@
+!/usr/bin/python
+
+
+from Bio.GenBank import RecordParser
+from Bio import SeqIO
+import MySQLdb as mariadb
+import os
+import re
+import gzip
+
+
+'''
+Global Counters
+'''
+genomeCount = 0
+repliconCount = 0
+geneCount = 0
+
+
+
+
+'''
+Open the files and parse the genome data
+'''
+def readGenomes(genomeID):
+
+        genomes = open('genomes.txt','a')
+        replicons = open('replicons.txt','a')
+
+
+        #Global variable
+        global genomeCount
+        global repliconCount
+        global geneCount
+
+
+        genomeCount = genomeCount + 1
+
+
+        #Initilaize genome variables
+        taxID = ''
+        domain = ''
+        name = ''
+        totalSize = 0
+        assembly = ''
+        
+        #Initialize replicon variables
+        localRepliconCount = 0
+
+        #Initialize local gene variables
+        localGeneCount = 0
+
+        genome = os.listdir(genomeID)[0]
+
+        with gzip.open('{}/{}/{}_genomic.gbff.gz'.format(genomeID,genome,genome),'r') as f:
+        
+                for record in SeqIO.parse(f,'genbank'):
+
+                        #Increment the number of replicons in the genome
+                        localRepliconCount = localRepliconCount + 1
+
+                        repliconCount = repliconCount + 1
+
+                        #Initialize replicon specific data
+                        size = 0
+                        repliconGeneCount = 0
+                        date = ''
+                        accession = ''
+                        topology = ''
+                        repliconType = ''
+
+
+                        repliconType = getRepliconType(record.description)
+                        topology,accession,date = getRepliconData(record.annotations)
+
+
+
+                        if assembly == '':
+
+                                assembly = getAssembly(record.dbxrefs)
+
+
+
+                        for feature in record.features:
+
+                                #Only needs to be done once
+                                if feature.type == 'source':
+
+                                        #print(feature)
+                                        domain = record.annotations['taxonomy'][0]
+
+
+                                        if taxID == '':
+
+                                                taxID,name = getInfo(feature)
+
+                                        size = getSize(feature)
+                                        totalSize += size
+
+
+                                if feature.type == 'CDS':
+
+                                        try:
+
+                                                feature.qualifiers['pseudo']
+                                        except KeyError:
+
+                                                psuedo = re.match(r'.+([<|>]).+',str(feature.location))
+ if psuedo is None:
+                                                        #print(str(feature.location))
+                                                        geneCount = geneCount + 1
+                                                        localGeneCount = localGeneCount + 1
+                                                        repliconGeneCount = repliconGeneCount + 1
+                                                        readCDS(feature,geneCount,repliconCount,genomeCount)
+
+                        replicons.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(repliconCount,genomeCount,name,repliconType,topology,repliconGeneCount,size,accession,date))
+
+
+
+        genomes.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(genomeCount,name,taxID,domain,localRepliconCount,localGeneCount,totalSize,assembly))
+
+
+'''
+Returns the taxID of the sequence
+'''
+def getInfo(source):
+
+        taxID = re.match(r'taxon:([0-9]+)',source.qualifiers['db_xref'][0]).group(1)
+        name = source.qualifiers['organism'][0]
+
+        return taxID, name
+
+'''
+Get the size of each replicon
+'''
+def getSize(source):
+
+        size = re.match(r'\[0:([0-9]+)\]',str(source.location)).group(1)
+
+        return int(size)
+
+'''
+Get the assembly of the genome
+'''
+def getAssembly(xrefs):
+
+
+        cell = filter(lambda x:re.search('Assembly:([\w]+)',x),xrefs)
+
+        assembly = re.match(r'Assembly:([\w]+)',cell[0]).group(1)
+
+        return assembly
+
+
+
+def readCDS(cds,geneID,repliconID,genomeID):
+
+        genes = open('genes.txt','a')
+
+        protein = ''
+        name = ''
+        product = ''
+ length,strand,exonCount = extractExons(cds.location,geneID)
+
+
+
+        locus = cds.qualifiers['locus_tag'][0]
+        try:
+
+                protein_id = cds.qualifiers['protein_id']
+                protein = ','.join(protein_id)
+                addXref(protein_id,geneID)
+
+        except KeyError:
+
+                protein = '-'
+
+        try:
+
+                name = ','.join(cds.qualifiers['gene'])
+        except KeyError:
+
+                name = '-'
+
+        try:
+
+                product = ';'.join(cds.qualifiers['product'])
+
+        except KeyError:
+
+                product = '-'
+
+        try:
+
+                synonyms = cds.qualifiers['gene_synonym']
+
+                addSynonym(synonyms,geneID)
+        except KeyError:
+
+                pass
+
+        try:
+
+                oldLocus = cds.qualifiers['old_locus_tag']
+
+                addSynonym(oldLocus,geneID)
+
+        except KeyError:
+
+                pass
+
+        try:
+
+                db = cds.qualifiers['db_xref']
+ addXref(db,geneID)
+        except KeyError:
+
+                pass
+
+        try:
+
+                functions = cds.qualifiers['function']
+                addFunction(functions,geneID)
+
+        except KeyError:
+
+                pass
+
+        genes.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(geneID,repliconID,genomeID,locus,protein,name,strand,exonCount,length,product))
+
+        #print(cds)
+
+
+def addFunction(functions,geneID):
+
+        functionsFile = open('functions.txt','a')
+        functionsFile.write('{}\t{}\n'.format(geneID,functions[0]))
+
+
+def addXref(db_xref,geneID):
+
+        db_xrefs = open('xdbs.txt','a')
+
+        for ref in db_xref:
+
+                data = ref.split(':')
+
+                if len(data) == 1:
+
+                        id = re.match(r'(.+)[.][0-9]',data[0]).group(1)
+
+                        db_xrefs.write('{}\t{}\t{}\n'.format(geneID,'refseq',id))
+                else:
+
+                        db = data[0].lower()
+                        id = data[1]
+
+                        if db == 'uniprotkb/swiss-prot':
+
+                                db = 'uniprot'
+
+
+                        db_xrefs.write('{}\t{}\t{}\n'.format(geneID,db,id))
+
+def addSynonym(synonyms,geneID):
+
+        synonymsFile = open('synonyms.txt','a')
+
+        allSynonyms = synonyms[0].split(';')
+
+        for synonym in allSynonyms:
+
+                synonymsFile.write('{}\t{}\n'.format(geneID,synonym))
+
+
+def extractExons(location,geneID):
+
+        exons = open('exons.txt','a')
+
+        try:
+
+                locations = re.match(r'\[([0-9]+):([0-9]+)\]\(([+|-])',str(location))
+
+                start = int(locations.group(1))
+                end = int(locations.group(2))
+
+                length = end - start
+                strand = locations.group(3)
+
+                exons.write('{}\t{}\t{}\t{}\t{}\n'.format(geneID,1,start,end,length))
+
+                return length, strand,1
+
+        except AttributeError:
+
+                exonCount = 0
+                totalLength = 0
+                strand = ''
+
+
+                locations = re.match(r'join{(.+)}',str(location)).group(1)
+
+                locationsList = locations.split(',')
+
+                for location in locationsList:
+                        exonCount = exonCount + 1
+                        loc = re.match(r'\[([0-9]+):([0-9]+)\]\(([+|-])',location.strip())
+
+                        start = int(loc.group(1))
+                        end = int(loc.group(2))
+
+                        strand = loc.group(3)
+
+                        length = end - start
+
+totalLength = totalLength + length
+
+                        exons.write('{}\t{}\t{}\t{}\t{}\n'.format(geneID,exonCount,start,end,length))
+
+                return totalLength, strand,exonCount
+
+
+def getRepliconData(annotations):
+
+        topology = annotations['topology']
+        accessions = ','.join(annotations['accessions'])
+        date = annotations['date']
+
+        return topology,accessions,date
+
+def getRepliconType(description):
+
+        repliconType = re.match(r'.+(plasmid|chromosome)',description)
+
+        if repliconType is not None:
+
+                return repliconType.group(1)
+
+
+
+        return 'chromosome'
+
+
+'''
+Main Function: Runs the logic of the script
+
+'''
+if __name__ == '__main__':
+
+
+
+
+        genomes = ['511145','1435057']
+
+        for genome in genomes:
+
+                readGenomes(genome)
+
